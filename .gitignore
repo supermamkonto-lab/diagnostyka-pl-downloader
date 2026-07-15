@@ -1,0 +1,9 @@
+state/
+downloads/
+logs/
+tools/api_reports/
+__pycache__/
+*.pyc
+*.db
+*.sqlite
+.env

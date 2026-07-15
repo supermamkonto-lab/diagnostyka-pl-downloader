@@ -1,0 +1,37 @@
+project:
+  name: Medical Data Collector
+  version: 1.0.0
+
+paths:
+  downloads: c:\AI_PROJECTS\LCV_TCM\MEDICAL_DATA_COLLECTOR_DIAGNOSTYKA_PL\DANE_DIAG_PL
+  state_db: state/collector.db
+  logs: logs
+
+chrome:
+  executable: C:\Program Files\Google\Chrome\Application\chrome.exe
+  user_data_dir: null
+  pwa_app_id: oincohahmilcojpmaimnbgbapfinndnc
+  remote_debugging_port: 9222
+
+portals:
+  diagnostyka_pl:
+    enabled: true
+    base_url: https://diag.pl
+    login_url: https://diag.pl
+    login_success_selector: null  # set after API analysis
+    request_delay_ms: 1500        # delay between requests to avoid rate limiting
+    max_retries: 3
+
+delta:
+  enabled: true
+  hash_algorithm: sha256
+
+ocr:
+  enabled: false        # set true when OCR pipeline is configured
+  engine: tesseract
+  language: pol+eng
+
+logging:
+  level: INFO
+  console: true
+  file: true
