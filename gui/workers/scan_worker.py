@@ -10,7 +10,7 @@ from pathlib import Path
 from core.logger import get_logger
 from core.browser_manager import BrowserManager
 from portals.diagnostyka_pl import DiagnostykaPl
-from portals.badaj_to import BadajTo
+from portals.badaj_to import BadajToPl
 
 
 class ScanWorker(QThread):
@@ -64,14 +64,15 @@ class ScanWorker(QThread):
             self.context, self.page = self.browser_manager.launch_pwa()
 
             # Create portal adapter based on type
+            download_dir = Path(self.config["paths"]["downloads"]).expanduser()
             if self.portal_id == "diagnostyka_pl":
                 portal = DiagnostykaPl(self.page, portal_config,
-                                      self.config["paths"]["downloads"],
+                                      str(download_dir),
                                       self.logger)
             elif self.portal_id == "badaj_to":
-                portal = BadajTo(self.page, portal_config,
-                               self.config["paths"]["downloads"],
-                               self.logger)
+                portal = BadajToPl(self.page, portal_config,
+                                  str(download_dir),
+                                  self.logger)
             else:
                 self.error_occurred.emit(f"Nieznany portal: {self.portal_id}")
                 return

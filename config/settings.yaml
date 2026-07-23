@@ -3,7 +3,7 @@ project:
   version: 1.0.0
 
 paths:
-  downloads: c:\AI_PROJECTS\LCV_TCM\MEDICAL_DATA_COLLECTOR_DIAGNOSTYKA_PL\DANE_DIAG_PL
+  downloads: ~/Downloads/diagnostyka_pl
   state_db: state/collector.db
   logs: logs
 
