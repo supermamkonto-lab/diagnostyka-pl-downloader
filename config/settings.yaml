@@ -16,10 +16,22 @@ chrome:
 portals:
   diagnostyka_pl:
     enabled: true
-    base_url: https://diag.pl
-    login_url: https://diag.pl
-    login_success_selector: null  # set after API analysis
+    base_url: https://wyniki.diag.pl
+    login_url: https://wyniki.diag.pl/logowanie-kontem
+    login_auth_field: jwt
     request_delay_ms: 1500        # delay between requests to avoid rate limiting
+    max_retries: 3
+
+  badaj_to:
+    enabled: true
+    base_url: https://wyniki.badaj.to
+    login_url: https://wyniki.badaj.to/
+    login_auth_endpoint: /Login/Authenticate
+    login_fields:
+      username: numerKarty
+      password: haslo
+    captcha_sitekey: 0x4AAAAAADTtsdegaTVr09jb
+    request_delay_ms: 1500
     max_retries: 3
 
 delta:

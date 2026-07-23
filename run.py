@@ -63,6 +63,7 @@ def cmd_collect(config: dict):
     from core.logger import get_logger
     from core.browser_manager import BrowserManager
     from portals.diagnostyka_pl import DiagnostykaPl
+    from portals.badaj_to import BadajToPl
 
     log = get_logger("collector", config["paths"]["logs"])
     db_path = config["paths"]["state_db"]
@@ -72,9 +73,20 @@ def cmd_collect(config: dict):
     state = StateManager(db_path)
     bm = BrowserManager(config, log)
 
+    portals_to_sync = []
+
+    # Sprawdź diagnostyka_pl
     portal_cfg = config.get("portals", {}).get("diagnostyka_pl", {})
-    if not portal_cfg.get("enabled", False):
-        log.info("diagnostyka_pl is disabled in config")
+    if portal_cfg.get("enabled", False):
+        portals_to_sync.append(("diagnostyka_pl", DiagnostykaPl))
+
+    # Sprawdź badaj_to
+    portal_cfg = config.get("portals", {}).get("badaj_to", {})
+    if portal_cfg.get("enabled", False):
+        portals_to_sync.append(("badaj_to", BadajToPl))
+
+    if not portals_to_sync:
+        log.error("❌ Żaden portal nie jest włączony w konfiguracji!")
         return
 
     download_dir = config["paths"]["downloads"]
@@ -82,94 +94,111 @@ def cmd_collect(config: dict):
     log.info(f"🗄️  Database: {db_path}")
 
     log.info("=" * 60)
-    log.info("🚀 === Medical Data Collector START ===")
+    log.info("🚀 === Medical Data Collector — Multi-Lab START ===")
+    log.info(f"📊 Portale do synchronizacji: {len(portals_to_sync)}")
+    for portal_name, _ in portals_to_sync:
+        log.info(f"   • {portal_name}")
     log.info("=" * 60)
-    sync_id = state.start_sync("diagnostyka_pl", "")
 
     try:
-        # PHASE 1: Launch browser
+        # PHASE 1: Launch browser (jeden raz dla wszystkich portali)
         log.info("\n[PHASE 1] Launching browser...")
         context, page = bm.launch_pwa()
         log.info("✓ Browser launched")
 
-        # PHASE 2: Create portal adapter
-        portal = DiagnostykaPl(page, config, download_dir, log)
+        # Synchronizuj każdy portal
+        all_downloaded = 0
+        for portal_idx, (portal_name, PortalClass) in enumerate(portals_to_sync, 1):
+            log.info(f"\n{'=' * 60}")
+            log.info(f"🔄 SYNCHRONIZACJA {portal_idx}/{len(portals_to_sync)}: {portal_name.upper()}")
+            log.info(f"{'=' * 60}")
 
-        # PHASE 3: Wait for login
-        log.info("\n[PHASE 2] Waiting for login...")
-        log.info("👤 Please log in to Diagnostyka manually in the browser window.")
-        if not portal.wait_for_login():
-            log.error("❌ Login failed or timed out. Aborting.")
-            state.finish_sync(sync_id, status="failed", error_message="login_timeout")
-            return
+            sync_id = state.start_sync(portal_name, "")
 
-        log.info("✓✓✓ Login confirmed!")
+            try:
+                # PHASE 2: Create portal adapter
+                portal = PortalClass(page, config, download_dir, log)
 
-        # PHASE 4: Fetch document list
-        log.info("\n[PHASE 3] Fetching document list...")
-        docs = portal.fetch_document_list()
-        on_portal = len(docs)
-        log.info(f"📊 Total on portal: {on_portal} documents")
+                # PHASE 3: Wait for login
+                log.info(f"\n[PHASE 2] Waiting for login ({portal_name})...")
+                log.info(f"👤 Please log in to {portal_name} manually in the browser window.")
+                if not portal.wait_for_login():
+                    log.error(f"❌ Login failed or timed out for {portal_name}. Skipping.")
+                    state.finish_sync(sync_id, status="failed", error_message="login_timeout")
+                    continue
 
-        # PHASE 5: Delta check
-        log.info("\n[PHASE 4] Checking database...")
-        known_ids = delta.get_known_ids("diagnostyka_pl")
-        log.info(f"📦 Already in DB: {len(known_ids)} documents")
+                log.info("✓✓✓ Login confirmed!")
 
-        new_docs = [d for d in docs if d.portal_document_id not in known_ids]
-        skipped = on_portal - len(new_docs)
-        log.info(f"✨ New documents: {len(new_docs)} | Skipped: {skipped}")
+                # PHASE 4: Fetch document list
+                log.info(f"\n[PHASE 3] Fetching document list from {portal_name}...")
+                docs = portal.fetch_document_list()
+                on_portal = len(docs)
+                log.info(f"📊 Total on portal: {on_portal} documents")
 
-        if len(new_docs) == 0:
-            log.info("ℹ️  No new documents to download")
-            state.finish_sync(
-                sync_id, status="success",
-                documents_on_portal=on_portal,
-                documents_in_db=len(known_ids),
-                documents_new=0,
-                documents_skipped=skipped,
-                documents_downloaded=0,
-            )
-            return
+                # PHASE 5: Delta check
+                log.info(f"\n[PHASE 4] Checking database for {portal_name}...")
+                known_ids = delta.get_known_ids(portal_name)
+                log.info(f"📦 Already in DB: {len(known_ids)} documents")
 
-        # Register new documents
-        for doc in new_docs:
-            delta.register_document(
-                "diagnostyka_pl", doc.portal_document_id,
-                doc.document_date, doc.document_name, doc.document_type
-            )
+                new_docs = [d for d in docs if d.portal_document_id not in known_ids]
+                skipped = on_portal - len(new_docs)
+                log.info(f"✨ New documents: {len(new_docs)} | Skipped: {skipped}")
 
-        # PHASE 6: Download
-        log.info(f"\n[PHASE 5] Downloading {len(new_docs)} documents...")
-        downloaded = 0
-        for idx, doc in enumerate(new_docs, 1):
-            log.info(f"   [{idx}/{len(new_docs)}] {doc.document_name} ({doc.document_date})")
-            result = portal.download_document(doc)
-            if result:
-                file_hash = DeltaManager.hash_file(result)
-                size = Path(result).stat().st_size
-                delta.mark_downloaded("diagnostyka_pl", doc.portal_document_id,
-                                      result, file_hash, size)
-                downloaded += 1
-                log.info(f"       ✓ Downloaded {size} bytes → {Path(result).name}")
-            else:
-                log.warning(f"       ✗ Failed to download")
+                if len(new_docs) == 0:
+                    log.info("ℹ️  No new documents to download")
+                    state.finish_sync(
+                        sync_id, status="success",
+                        documents_on_portal=on_portal,
+                        documents_in_db=len(known_ids),
+                        documents_new=0,
+                        documents_skipped=skipped,
+                        documents_downloaded=0,
+                    )
+                    continue
 
-        # PHASE 7: Summary
-        log.info("\n[PHASE 6] Sync summary...")
-        state.finish_sync(
-            sync_id, status="success",
-            documents_on_portal=on_portal,
-            documents_in_db=len(known_ids),
-            documents_new=len(new_docs),
-            documents_skipped=skipped,
-            documents_downloaded=downloaded,
-        )
+                # Register new documents
+                for doc in new_docs:
+                    delta.register_document(
+                        portal_name, doc.portal_document_id,
+                        doc.document_date, doc.document_name, doc.document_type
+                    )
 
-        stats = delta.get_stats("diagnostyka_pl")
-        log.info("=" * 60)
-        log.info(f"✓ SUCCESS — Downloaded: {downloaded} | Total in DB: {stats.get('total', 0)}")
-        log.info("=" * 60)
+                # PHASE 6: Download
+                log.info(f"\n[PHASE 5] Downloading {len(new_docs)} documents from {portal_name}...")
+                downloaded = 0
+                for idx, doc in enumerate(new_docs, 1):
+                    log.info(f"   [{idx}/{len(new_docs)}] {doc.document_name} ({doc.document_date})")
+                    result = portal.download_document(doc)
+                    if result:
+                        file_hash = DeltaManager.hash_file(result)
+                        size = Path(result).stat().st_size
+                        delta.mark_downloaded(portal_name, doc.portal_document_id,
+                                              result, file_hash, size)
+                        downloaded += 1
+                        all_downloaded += 1
+                        log.info(f"       ✓ Downloaded {size} bytes → {Path(result).name}")
+                    else:
+                        log.warning(f"       ✗ Failed to download")
+
+                # PHASE 7: Summary
+                log.info(f"\n[PHASE 6] Sync summary for {portal_name}...")
+                state.finish_sync(
+                    sync_id, status="success",
+                    documents_on_portal=on_portal,
+                    documents_in_db=len(known_ids),
+                    documents_new=len(new_docs),
+                    documents_skipped=skipped,
+                    documents_downloaded=downloaded,
+                )
+
+                stats = delta.get_stats(portal_name)
+                log.info("=" * 60)
+                log.info(f"✓ {portal_name.upper()} — Downloaded: {downloaded} | Total in DB: {stats.get('total', 0)}")
+                log.info("=" * 60)
+
+            except Exception as e:
+                log.exception(f"❌ Error syncing {portal_name}: {e}")
+                state.finish_sync(sync_id, status="failed", error_message=str(e))
 
         # Podsumowanie pobranych plików
         log.info("\n📋 LISTA POBRANYCH PLIKÓW:")
@@ -184,9 +213,17 @@ def cmd_collect(config: dict):
         log.info(f"  Łącznie: {len(file_list)} plików | {total_size // 1024 // 1024} MB ({total_size:,} B)")
         log.info("=" * 60)
 
+        # FINAL SUMMARY — Multi-Lab
+        log.info("\n" + "=" * 60)
+        log.info("🎉 === MEDICAL DATA COLLECTOR — MULTI-LAB ===")
+        log.info("=" * 60)
+        log.info(f"✓ Total downloaded: {all_downloaded} documents")
+        log.info(f"📊 Total files: {len(file_list)}")
+        log.info(f"💾 Total size: {total_size // 1024 // 1024} MB")
+        log.info("=" * 60)
+
     except Exception as e:
         log.exception(f"❌ Collector error: {e}")
-        state.finish_sync(sync_id, status="failed", error_message=str(e))
     finally:
         log.info("\n🔌 Closing browser...")
         bm.close()

@@ -4,15 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Medical Data Collector** — Automatyczne pobieranie wyników badań (PDF + CDA/XML) z portalu wyniki.diag.pl.
+**Medical Data Collector — Multi-Lab** — Automatyczne pobieranie wyników badań (PDF + CDA/XML) z wielu portali laboratoriów w Polsce.
+
+Currently supported laboratories:
+- **Diagnostyka.pl** (wyniki.diag.pl) — login: PESEL + hasło
+- **Badaj.to** (wyniki.badaj.to) — login: numer karty KK + hasło
 
 This is a Python-based web scraper that:
-- Launches Chrome browser for manual PWA login (credentials never saved)
-- Detects login via JWT cookie and session persistence
-- Fetches document list from diagnostyka.pl API
+- Launches Chrome browser for manual login (credentials never saved)
+- Detects login and manages session cookies
+- Fetches document list from multiple portals
 - Downloads PDFs and CDA/XML files with deduplication
 - Tracks sync state in SQLite database
 - Supports optional OCR and database import pipelines
+- Manages multiple laboratories in single database
 
 ## Quick Commands
 
@@ -60,11 +65,18 @@ python -m playwright install chromium
 
 ### Portal Adapter (`portals/`)
 - **`base_portal.py`** — Abstract base class defining portal interface.
-- **`diagnostyka_pl.py`** — Diagnostyka.pl implementation:
+- **`diagnostyka_pl.py`** — Diagnostyka.pl (wyniki.diag.pl) implementation:
   - API base: `https://api.wyniki.diag.pl`
   - Auth: Cookie-based JWT (`jwt` cookie on wyniki.diag.pl)
+  - Login: PESEL + hasło
   - Key methods: `wait_for_login()` (5-min timeout, persistent cookies), `fetch_document_list()` (scrolls to load all orders), `download_document()` (fetches PDF fileType=1 + CDA fileType=4).
   - Login detection: checks for JWT cookie presence; falls back to persistent session from previous run.
+- **`badaj_to.py`** — Badaj.to (Śląskie Laboratoria Analityczne / ProfLab) implementation:
+  - Base: `https://wyniki.badaj.to`
+  - Auth: POST `/Login/Authenticate` with `numerKarty` (card number) + `haslo` (password)
+  - CAPTCHA: Cloudflare Turnstile (requires manual interaction)
+  - Login detection: checks for session cookie presence
+  - Document fetching: HTML scraping (API structure TBD)
 
 ### Pipeline Module (`pipeline/`)
 - **`ocr_dispatcher.py`** — Optional OCR processing (disabled by default, requires Tesseract).
@@ -77,24 +89,29 @@ python -m playwright install chromium
 
 Key sections:
 - **paths** — `downloads` (output folder), `state_db` (SQLite path), `logs`.
-- **chrome** — `executable` (Chrome binary path), `remote_debugging_port` (9222 for CDP), `pwa_app_id`.
-- **portals.diagnostyka_pl** — `enabled`, `request_delay_ms` (rate limit, default 1500ms), `max_retries` (default 3).
+- **chrome** — `executable` (Chrome binary path), `remote_debugging_port` (9222 for CDP).
+- **portals.diagnostyka_pl** — `enabled`, `request_delay_ms`, `max_retries`.
+- **portals.badaj_to** — `enabled`, `login_fields` (numerKarty/haslo), `captcha_sitekey`, `request_delay_ms`, `max_retries`.
 - **ocr** — `enabled` (false by default), `engine` (tesseract), `language`.
 
 ### Important Config Notes
 - `request_delay_ms: 1500` — safety delay between API requests to avoid rate-limiting.
 - `max_retries: 3` — retry failed downloads up to 3 times.
-- Chrome launches in non-headless mode with persistent profile to preserve login session across runs.
+- Chrome launches in non-headless mode with persistent profile to preserve login sessions across runs.
+- Each portal can be independently enabled/disabled via config.
+- Database stores documents from all portals with `portal_id` field for distinction.
 
-## Sync Workflow (7 Phases)
+## Sync Workflow (Multi-Lab, 7 Phases per Portal)
 
-1. **Launch browser** — BrowserManager calls `launch_persistent_context()`, navigates to wyniki.diag.pl.
-2. **Wait for login** — Polls for JWT cookie; supports re-login if expired. 5-min timeout.
-3. **Fetch document list** — DiagnostykaPl calls API, scrolls to load all orders, returns list of PortalDocument objects.
-4. **Delta check** — DeltaManager queries DB for known document IDs, identifies new ones.
-5. **Register new docs** — Insert new records into `documents` table (downloaded=0).
-6. **Download** — Loop through new documents, call `download_document()`, mark as downloaded (set hash, file_path, size).
-7. **Summary** — Log stats, update `sync_log` with counts, close browser.
+1. **Launch browser** (once) — BrowserManager calls `launch_persistent_context()`.
+2. **For each enabled portal:**
+   - **Wait for login** — Portal-specific login (PESEL or card number). 5-min timeout.
+   - **Fetch document list** — Portal adapter calls API or scrapes, returns list of PortalDocument objects.
+   - **Delta check** — DeltaManager queries DB for known document IDs in that portal, identifies new ones.
+   - **Register new docs** — Insert new records into `documents` table with portal_id (downloaded=0).
+   - **Download** — Loop through new documents, call `download_document()`, mark as downloaded (set hash, file_path, size).
+   - **Summary** — Log stats per portal, update `sync_log` with counts.
+3. **Final summary** — Report total downloads from all portals, close browser.
 
 ## Database Schema (Key Points)
 
@@ -173,11 +190,22 @@ Captures all network requests during login; outputs JSON to `tools/api_reports/d
 - If file already exists (same hash): skipped automatically.
 - Prevents redundant downloads on re-runs.
 
-### Adding a New Portal
-1. Create `portals/new_portal.py` inheriting from `BasePortal`.
-2. Implement: `wait_for_login()`, `fetch_document_list()`, `download_document()`.
-3. Add config section to `settings.yaml`.
-4. Add instantiation in `run.py:cmd_collect()`.
+### Adding a New Portal (e.g., synlab.pl, medicover.pl)
+1. Create `portals/synlab_pl.py` inheriting from `BasePortal`.
+2. Implement required methods:
+   - `wait_for_login()` — detect successful authentication (cookie, URL change, or element presence)
+   - `fetch_document_list()` — return list of `PortalDocument` objects
+   - `download_document(doc)` — download PDF/CDA and return local file path
+3. Add config section to `settings.yaml`:
+   ```yaml
+   synlab_pl:
+     enabled: true
+     base_url: https://wyniki.synlab.pl
+     request_delay_ms: 1500
+     max_retries: 3
+   ```
+4. The portal will automatically integrate into `run.py:cmd_collect()` loop (no code changes needed).
+5. Update `CLAUDE.md` with login/auth details for the new portal.
 
 ### Extending the Pipeline
 - OCR: Enable `ocr.enabled = true` in config; hook into pipeline after download phase.
