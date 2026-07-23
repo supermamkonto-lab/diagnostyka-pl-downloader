@@ -5,6 +5,7 @@ Download Worker — Async file downloading in separate thread with progress trac
 from PyQt6.QtCore import QThread, pyqtSignal
 from typing import List, Optional, Any
 from gui.widgets.document_list import Document
+from pathlib import Path
 import time
 
 
@@ -36,6 +37,10 @@ class DownloadWorker(QThread):
         failed = 0
 
         try:
+            # Ensure download folder exists
+            download_path = Path(self.download_folder).expanduser()
+            download_path.mkdir(parents=True, exist_ok=True)
+
             total = len(self.documents)
 
             # Build mapping of document IDs to portal documents
