@@ -35,6 +35,8 @@ class LabTab(QWidget):
 
         self.selected_documents = []
         self.download_folder = str(Path.home() / "Downloads")
+        self.portal_instance = None
+        self.portal_documents = []
 
         self.init_ui()
 
@@ -197,17 +199,63 @@ class LabTab(QWidget):
         """Obsługuj logowanie."""
         self.login_btn.setEnabled(False)
         self.login_btn.setText("⏳ Logowanie...")
-
-        # TODO: Uruchom ScanWorker z login=True
         self.status_label.setText("🟡 Logowanie...")
         self.status_label.setStyleSheet("color: #ffb81c;")
+
+        self._start_scan(login_required=True)
 
     def on_scan(self):
         """Obsługuj skanowanie listy dokumentów."""
         self.scan_btn.setEnabled(False)
         self.scan_btn.setText("⏳ Skanowanie...")
+        self._start_scan(login_required=False)
 
-        # TODO: Uruchom ScanWorker
+    def _start_scan(self, login_required: bool = False):
+        """Uruchom ScanWorker."""
+        if self.scan_worker and self.scan_worker.isRunning():
+            return
+
+        self.scan_worker = ScanWorker(self.portal_id, login_required)
+        self.scan_worker.progress.connect(self._on_scan_progress)
+        self.scan_worker.documents_found.connect(self._on_documents_found)
+        self.scan_worker.error_occurred.connect(self._on_scan_error)
+        self.scan_worker.finished_signal.connect(self._on_scan_finished)
+        self.scan_worker.portal_ready.connect(self._on_portal_ready)
+        self.scan_worker.start()
+
+    def _on_scan_progress(self, pct: int, msg: str):
+        """Odbierz progress ze skanowania."""
+        self.progress_bar.setValue(pct)
+        self.progress_label.setText(msg)
+
+    def _on_documents_found(self, documents):
+        """Odbierz listę dokumentów."""
+        self.doc_list.clear_documents()
+        self.doc_list.add_documents(documents)
+        self.portal_documents = documents
+        self.update_stats()
+
+    def _on_scan_error(self, error_msg: str):
+        """Obsługuj błąd skanowania."""
+        self.progress_label.setText(f"❌ Błąd: {error_msg}")
+        self.status_label.setText(f"🔴 Błąd: {error_msg[:50]}...")
+        self.status_label.setStyleSheet("color: #ff6b6b;")
+        self.login_btn.setEnabled(True)
+        self.login_btn.setText("🔐 Zaloguj")
+        self.scan_btn.setEnabled(True)
+        self.scan_btn.setText("🔍 Skanuj")
+
+    def _on_portal_ready(self, portal_instance):
+        """Odbierz portal instance ze ScanWorkera."""
+        self.portal_instance = portal_instance
+
+    def _on_scan_finished(self):
+        """Obsługuj koniec skanowania."""
+        self.set_logged_in()
+        self.progress_bar.setValue(100)
+        self.progress_label.setText("Skanowanie ukończone!")
+        self.scan_btn.setText("🔍 Skanuj")
+        self.scan_btn.setEnabled(True)
 
     def on_filter_changed(self):
         """Obsługuj zmianę filtrów."""
@@ -237,8 +285,14 @@ class LabTab(QWidget):
 
     def on_download(self):
         """Uruchom pobieranie zaznaczonych dokumentów."""
-        if not self.selected_documents:
+        # Pobierz zaznaczone dokumenty
+        selected = self.doc_list.get_selected()
+        if not selected:
             QMessageBox.warning(self, "Brak zaznaczenia", "Zaznacz przynajmniej jeden plik!")
+            return
+
+        if not self.portal_instance:
+            QMessageBox.warning(self, "Błąd", "Brak połączenia z portalem. Spróbuj zalogować się ponownie.")
             return
 
         self.download_btn.setEnabled(False)
@@ -246,7 +300,21 @@ class LabTab(QWidget):
         self.progress_bar.setValue(0)
         self.progress_label.setText("Rozpoczynanie pobierania...")
 
-        # TODO: Uruchom DownloadWorker
+        self.download_worker = DownloadWorker(
+            selected,
+            self.download_folder,
+            self.portal_id,
+            self.portal_instance,
+            self.portal_documents
+        )
+
+        self.download_worker.progress.connect(self._on_download_progress)
+        self.download_worker.current_file.connect(self._on_current_file)
+        self.download_worker.file_completed.connect(self._on_file_completed)
+        self.download_worker.speed_updated.connect(self._on_speed_updated)
+        self.download_worker.error_occurred.connect(self._on_download_error)
+        self.download_worker.finished_signal.connect(self._on_download_finished)
+        self.download_worker.start()
 
     def on_cancel(self):
         """Anuluj pobieranie."""
@@ -254,6 +322,50 @@ class LabTab(QWidget):
             self.download_worker.stop()
         self.cancel_btn.setEnabled(False)
         self.progress_label.setText("Anulowano")
+
+    def _on_download_progress(self, pct: int):
+        """Odbierz progress pobierania."""
+        self.progress_bar.setValue(pct)
+
+    def _on_current_file(self, filename: str, current_mb: float, total_mb: float):
+        """Odbierz info o bieżącym pliku."""
+        if total_mb > 0:
+            pct = int((current_mb / total_mb) * 100)
+            self.progress_label.setText(f"{filename} ({current_mb:.1f}/{total_mb:.1f} MB)")
+        else:
+            self.progress_label.setText(f"{filename}")
+
+    def _on_file_completed(self, filename: str, success: bool):
+        """Odbierz informację o ukończeniu pobierania pliku."""
+        status = "✓" if success else "✗"
+        self.progress_label.setText(f"{status} {filename}")
+
+    def _on_speed_updated(self, speed_mbps: float, eta_seconds: int):
+        """Odbierz update prędkości i ETA."""
+        if eta_seconds > 0:
+            eta_str = f"{eta_seconds}s" if eta_seconds < 60 else f"{eta_seconds // 60}m"
+            self.progress_label.setText(f"Prędkość: {speed_mbps:.1f} MB/s | ETA: {eta_str}")
+
+    def _on_download_error(self, error_msg: str):
+        """Obsługuj błąd pobierania."""
+        self.progress_label.setText(f"❌ Błąd: {error_msg}")
+        QMessageBox.warning(self, "Błąd pobierania", error_msg)
+
+    def _on_download_finished(self, completed: int, failed: int):
+        """Obsługuj koniec pobierania."""
+        self.progress_bar.setValue(100)
+        self.download_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+
+        total = completed + failed
+        msg = f"Ukończone! {completed}/{total} plików pobranych pomyślnie."
+        self.progress_label.setText(msg)
+
+        if failed > 0:
+            QMessageBox.information(self, "Pobieranie ukończone",
+                                  f"{completed} plików pobranych.\n{failed} błędów.")
+        else:
+            QMessageBox.information(self, "Powodzenie", msg)
 
     def on_settings(self):
         """Otwórz ustawienia."""

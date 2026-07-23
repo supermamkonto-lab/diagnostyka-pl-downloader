@@ -3,7 +3,7 @@ Download Worker — Async file downloading in separate thread with progress trac
 """
 
 from PyQt6.QtCore import QThread, pyqtSignal
-from typing import List, Optional
+from typing import List, Optional, Any
 from gui.widgets.document_list import Document
 import time
 
@@ -19,11 +19,15 @@ class DownloadWorker(QThread):
     error_occurred = pyqtSignal(str)  # error message
     finished_signal = pyqtSignal(int, int)  # completed_count, failed_count
 
-    def __init__(self, documents: List[Document], download_folder: str, portal_id: str):
+    def __init__(self, documents: List[Document], download_folder: str,
+                 portal_id: str, portal_instance: Any = None,
+                 portal_documents: List[Any] = None):
         super().__init__()
         self.documents = documents
         self.download_folder = download_folder
         self.portal_id = portal_id
+        self.portal = portal_instance
+        self.portal_documents = portal_documents or []
         self._is_running = True
 
     def run(self):
@@ -34,22 +38,31 @@ class DownloadWorker(QThread):
         try:
             total = len(self.documents)
 
-            for idx, doc in enumerate(self.documents):
+            # Build mapping of document IDs to portal documents
+            doc_map = {str(pdoc.portal_document_id): pdoc for pdoc in self.portal_documents}
+
+            for idx, gui_doc in enumerate(self.documents):
                 if not self._is_running:
                     break
 
                 progress_pct = int((idx / total) * 100)
                 self.progress.emit(progress_pct)
 
-                # Symuluj pobieranie
-                success = self._download_file(doc, idx + 1, total)
+                # Pobierz odpowiadający portal dokument
+                portal_doc = doc_map.get(gui_doc.id)
+                if not portal_doc:
+                    self.file_completed.emit(gui_doc.name, False)
+                    failed += 1
+                    continue
+
+                success = self._download_file(gui_doc, portal_doc, idx + 1, total)
 
                 if success:
                     completed += 1
-                    self.file_completed.emit(f"{doc.date}_{doc.name}.{doc.file_type}", True)
+                    self.file_completed.emit(gui_doc.name, True)
                 else:
                     failed += 1
-                    self.file_completed.emit(f"{doc.date}_{doc.name}.{doc.file_type}", False)
+                    self.file_completed.emit(gui_doc.name, False)
 
             self.progress.emit(100)
             self.finished_signal.emit(completed, failed)
@@ -57,32 +70,36 @@ class DownloadWorker(QThread):
         except Exception as e:
             self.error_occurred.emit(str(e))
 
-    def _download_file(self, doc: Document, current: int, total: int) -> bool:
+    def _download_file(self, gui_doc: Document, portal_doc: Any, current: int, total: int) -> bool:
         """Pobierz pojedynczy plik."""
         try:
-            filename = f"{doc.date}_{doc.name}.{doc.file_type}"
-            self.current_file.emit(filename, 0, doc.size_mb)
+            filename = gui_doc.name
 
-            # Symuluj pobieranie z progresem
-            chunks = 10
-            for chunk in range(chunks):
-                if not self._is_running:
-                    return False
+            if not self.portal:
+                # Jeśli brak portalu, symuluj
+                self.current_file.emit(filename, 0, gui_doc.size_mb)
+                time.sleep(0.3)
+                self.current_file.emit(filename, gui_doc.size_mb, gui_doc.size_mb)
+                self.speed_updated.emit(10.0, 0)
+                return True
 
-                # Symuluj pobieranie
-                time.sleep(0.2)
-                downloaded_mb = (chunk + 1) / chunks * doc.size_mb
-                self.current_file.emit(filename, downloaded_mb, doc.size_mb)
+            # Użyj prawdziwego portalu do pobrania
+            self.current_file.emit(filename, 0, gui_doc.size_mb)
 
-                # Symuluj prędkość pobierania
-                speed = doc.size_mb / (chunks * 0.2) * (chunk + 1) / chunks
-                eta = int((doc.size_mb - downloaded_mb) / max(speed, 0.1))
-                self.speed_updated.emit(speed, eta)
+            start_time = time.time()
+            result = self.portal.download_document(portal_doc)
+            elapsed = time.time() - start_time
 
-            return True
+            if result:
+                self.current_file.emit(filename, gui_doc.size_mb, gui_doc.size_mb)
+                speed = gui_doc.size_mb / max(elapsed, 0.1) if elapsed > 0 else 0
+                self.speed_updated.emit(speed, 0)
+                return True
+            else:
+                return False
 
         except Exception as e:
-            self.error_occurred.emit(f"Błąd pobierania {doc.name}: {str(e)}")
+            self.error_occurred.emit(f"Błąd pobierania {gui_doc.name}: {str(e)}")
             return False
 
     def stop(self):
