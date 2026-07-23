@@ -39,6 +39,15 @@ python run.py status
 python run.py analyze-api
 ```
 
+### Running the GUI Application
+```bash
+# Desktop GUI (recommended)
+python gui_app.py
+
+# Opens PyQt6 interface with tabs for each laboratory
+# Login, scan documents, filter, and download in one app
+```
+
 ### Installing Dependencies
 ```bash
 pip install -r requirements.txt
@@ -77,6 +86,64 @@ python -m playwright install chromium
   - CAPTCHA: Cloudflare Turnstile (requires manual interaction)
   - Login detection: checks for session cookie presence
   - Document fetching: HTML scraping (API structure TBD)
+
+### GUI Module (`gui/`)
+Desktop PyQt6 application for interactive document browsing and downloading.
+
+**Entry point:**
+- **`gui_app.py`** — Main application launcher (QApplication, Fusion style, dark mode theme).
+
+**Main window:**
+- **`gui/main_window.py`** — QMainWindow with QTabWidget for multiple laboratories.
+
+**Tabs & Widgets:**
+- **`gui/tabs/lab_tab.py`** — Individual laboratory interface (login, scan, filter, select, download).
+  - Status indicator (logged in/out)
+  - Toolbar: Login, Scan, Settings buttons
+  - Filter panel: date range, test type search, free text search
+  - Document list with checkbox selection
+  - Selection statistics and quick select/deselect buttons
+  - Folder chooser for downloads
+  - Progress bar with real-time updates
+  - Download button (enabled only when documents selected)
+- **`gui/widgets/document_list.py`** — DocumentListWidget (QTableWidget with 6 columns: checkbox, date, type, file_type, size, status).
+  - Dataclass Document representing a single document
+  - Methods for selection, filtering, statistics
+
+**Workers (async threads):**
+- **`gui/workers/scan_worker.py`** — ScanWorker (QThread) for async login + document fetch
+  - Loads config from settings.yaml
+  - Launches BrowserManager with persistent Chrome context
+  - Instantiates portal adapter (DiagnostykaPl or BadajToPl)
+  - Waits for manual user login (5-min timeout)
+  - Fetches document list via portal API
+  - Converts PortalDocument → GUI Document
+  - Emits portal_ready signal to keep browser alive for downloads
+  - Signals: progress, documents_found, error_occurred, finished_signal, portal_ready
+- **`gui/workers/download_worker.py`** — DownloadWorker (QThread) for async file downloads
+  - Accepts portal instance from ScanWorker
+  - Maps GUI documents to portal documents
+  - Calls portal.download_document() for each file
+  - Tracks per-file progress (current MB, total MB)
+  - Calculates download speed and ETA
+  - Handles failures gracefully (continues with next file)
+  - Signals: progress, current_file, file_completed, speed_updated, error_occurred, finished_signal
+
+**Styling:**
+- **`gui/styles.py`** — Dark mode stylesheet for PyQt6 (custom colors, button styles, hover effects)
+  - Primary color: #0d7377 (teal), Highlight: #14919b, Background: #1e1e1e
+
+**UI Flow:**
+1. User clicks "🔐 Zaloguj" (Login)
+2. ScanWorker launches browser, user logs in manually
+3. After JWT/session cookie detected → document list fetched
+4. LabTab displays documents in table
+5. User filters (date range, type search), selects documents with checkboxes
+6. User chooses download folder
+7. User clicks "⬇️ POBIERZ ZAZNACZONE" (Download Selected)
+8. DownloadWorker uses active portal connection to download each file
+9. Real-time progress updates with speed/ETA
+10. User can start another scan or download without re-logging-in (persistent session)
 
 ### Pipeline Module (`pipeline/`)
 - **`ocr_dispatcher.py`** — Optional OCR processing (disabled by default, requires Tesseract).
