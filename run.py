@@ -63,6 +63,8 @@ def cmd_collect(config: dict):
     from core.logger import get_logger
     from core.browser_manager import BrowserManager
     from portals.diagnostyka_pl import DiagnostykaPl
+    from pipeline.ocr_dispatcher import OcrDispatcher
+    from pipeline.database_updater import DatabaseUpdater
 
     log = get_logger("collector", config["paths"]["logs"])
     db_path = config["paths"]["state_db"]
@@ -139,9 +141,11 @@ def cmd_collect(config: dict):
                 doc.document_date, doc.document_name, doc.document_type
             )
 
-        # PHASE 6: Download
+        # PHASE 6: Download + OCR
         log.info(f"\n[PHASE 5] Downloading {len(new_docs)} documents...")
+        ocr = OcrDispatcher(config, delta, log)
         downloaded = 0
+        ocr_done = 0
         for idx, doc in enumerate(new_docs, 1):
             log.info(f"   [{idx}/{len(new_docs)}] {doc.document_name} ({doc.document_date})")
             result = portal.download_document(doc)
@@ -152,11 +156,25 @@ def cmd_collect(config: dict):
                                       result, file_hash, size)
                 downloaded += 1
                 log.info(f"       ✓ Downloaded {size} bytes → {Path(result).name}")
+
+                text_path = ocr.process("diagnostyka_pl", doc.portal_document_id, result)
+                if text_path:
+                    delta.mark_ocr_done("diagnostyka_pl", doc.portal_document_id, text_path)
+                    ocr_done += 1
             else:
                 log.warning(f"       ✗ Failed to download")
 
-        # PHASE 7: Summary
-        log.info("\n[PHASE 6] Sync summary...")
+        if ocr._enabled:
+            log.info(f"✓ OCR completed for {ocr_done}/{downloaded} documents")
+
+        # PHASE 7: Master database import
+        log.info("\n[PHASE 6] Importing into MASTER_LAB_DATABASE...")
+        updater = DatabaseUpdater(config, delta, log)
+        imported = updater.import_pending("diagnostyka_pl")
+        log.info(f"✓ Imported {imported} documents into MASTER_LAB_DATABASE")
+
+        # PHASE 8: Summary
+        log.info("\n[PHASE 7] Sync summary...")
         state.finish_sync(
             sync_id, status="success",
             documents_on_portal=on_portal,

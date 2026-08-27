@@ -5,6 +5,7 @@ project:
 paths:
   downloads: c:\AI_PROJECTS\LCV_TCM\MEDICAL_DATA_COLLECTOR_DIAGNOSTYKA_PL\DANE_DIAG_PL
   state_db: state/collector.db
+  master_lab_db: state/master_lab.db
   logs: logs
 
 chrome:
